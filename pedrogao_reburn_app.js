@@ -1637,9 +1637,7 @@ if (USE_ASSET) {
       origRootWidgets.push(rootList.get(i_root));
     }
 
-  }
-
-  else {
+  } else {
   // First-run preview: USE_ASSET is false, asset hasn't been exported yet.
   // Show three minimal layers so user can verify data wiring before
   // running the export tasks.
