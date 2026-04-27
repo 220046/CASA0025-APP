@@ -69,5 +69,67 @@ var nbr_post = s2_with_cs.filterDate('2017-08-01','2017-10-31')
   .map(maskAndScale).map(addNBR).select('NBR').median().rename('NBR_post');
 var dNBR_2017 = nbr_pre.subtract(nbr_post).multiply(1000).rename('dNBR_2017');
 
+// predictors
+function summerNBR(year) {
+  var nbr = s2_with_cs.filterDate(year + '-06-01', year + '-09-30')
+    .map(maskAndScale).map(addNBR).select('NBR').median();
+  return ee.Image.constant(year).toFloat().addBands(nbr).rename(['year','NBR']);
+}
+
+// slope fit 2018-2020: bulk Portuguese reburns happened in the 2022-2023 drought,
+// so a slope fitted across the full window would be partly driven by NBR collapses
+// caused by the very reburn events the model is predicting (temporal leakage).
+var slopeYears = [2018, 2019, 2020];
+var nbrSeries = ee.ImageCollection(slopeYears.map(summerNBR));
+var recoveryFit = nbrSeries.reduce(ee.Reducer.linearFit());
+var NBR_slope = recoveryFit.select('scale').rename('NBR_slope');
+var NBR_offset = recoveryFit.select('offset').rename('NBR_offset');
+var s2_2025 = s2_with_cs.filterDate('2025-06-01','2025-09-30')
+  .map(maskAndScale).map(addNBR).map(addNDMI).map(addNDVI);
+var NDVI_2025 = s2_2025.select('NDVI').median().rename('NDVI_2025');
+var NDMI_2025_min = s2_2025.select('NDMI').min().rename('NDMI_2025_min');
+
+function landsatLST(img) {
+  var qa = img.select('QA_PIXEL');
+  // mask cloud bit 3 and cloud shadow bit 4. Cirrus bit 2 kept because its
+  // effect on ST_B10 is minimal and aggressive QA masking drops valid pixels.
+  var clear = qa.bitwiseAnd(1 << 3).eq(0).and(qa.bitwiseAnd(1 << 4).eq(0));
+  return img.select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15)
+    .updateMask(clear).rename('LST');
+}
+var L8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2');
+var L9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2');
+// .max captures fire-danger heat extremes (Yebra 2013), not summer-average
+// warming. CLOUD_COVER<60 prefilter on Landsat C2.
+var LST_2025_max = L8.merge(L9)
+  .filterDate('2025-06-01','2025-09-30').filterBounds(aoi_burn)
+  .filter(ee.Filter.lt('CLOUD_COVER', 60))
+  .map(landsatLST).max().rename('LST_2025_max');
+var dem = ee.ImageCollection('COPERNICUS/DEM/GLO30').mosaic().select('DEM').rename('elevation');
+var terrain = ee.Terrain.products(dem);
+// slope dropped: zero RF importance at 100 m resampling smoothing (Strobl et al. 2007)
+var aspect = terrain.select('aspect').unmask(0).rename('aspect');
+var elevation = dem.unmask(0);
+
+// dist_settlement dropped in v2: zero RF importance at 100 m
+// rural footprint, uniform settlement distance, signal absorbed by elevation
+function clipLocal(img) { return img.clip(aoi_buffered); }
+
+// Stage A: bundle 8 predictor bands and export to asset.
+var predictors_raw = ee.Image.cat([
+  clipLocal(dNBR_2017), clipLocal(NBR_slope), clipLocal(NBR_offset),
+  clipLocal(NDVI_2025), clipLocal(NDMI_2025_min), clipLocal(LST_2025_max),
+  clipLocal(aspect), clipLocal(elevation)
+]);
+
+Export.image.toAsset({
+  image: predictors_raw.toFloat(),
+  description: 'predictors_export_icnf',
+  assetId: ASSET_PATH,
+  region: aoi_burn, scale: GRID_SCALE, crs: TARGET_PROJ, maxPixels: 1e10
+});
+
+var predictors = USE_ASSET ? ee.Image(ASSET_PATH).clip(aoi_burn) : predictors_raw.clip(aoi_burn);
+var label_100m = burned_after.clip(aoi_burn).rename('reburn');
 // Each team member appends their assigned section below in order.
 // Refer to TASK_SPLIT.md for the section ownership map and the code for each Part.
