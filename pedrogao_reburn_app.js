@@ -105,5 +105,13 @@ var LST_2025_max = L8.merge(L9)
   .filterDate('2025-06-01','2025-09-30').filterBounds(aoi_burn)
   .filter(ee.Filter.lt('CLOUD_COVER', 60))
   .map(landsatLST).max().rename('LST_2025_max');
+var dem = ee.ImageCollection('COPERNICUS/DEM/GLO30').mosaic().select('DEM').rename('elevation');
+var terrain = ee.Terrain.products(dem);
+// slope dropped: zero RF importance at 100 m resampling smoothing (Strobl et al. 2007)
+var aspect = terrain.select('aspect').unmask(0).rename('aspect');
+var elevation = dem.unmask(0);
+
+// dist_settlement dropped in v2: zero RF importance at 100 m
+// rural footprint, uniform settlement distance, signal absorbed by elevation
 // Each team member appends their assigned section below in order.
 // Refer to TASK_SPLIT.md for the section ownership map and the code for each Part.
