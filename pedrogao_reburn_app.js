@@ -69,5 +69,20 @@ var nbr_post = s2_with_cs.filterDate('2017-08-01','2017-10-31')
   .map(maskAndScale).map(addNBR).select('NBR').median().rename('NBR_post');
 var dNBR_2017 = nbr_pre.subtract(nbr_post).multiply(1000).rename('dNBR_2017');
 
+// predictors
+function summerNBR(year) {
+  var nbr = s2_with_cs.filterDate(year + '-06-01', year + '-09-30')
+    .map(maskAndScale).map(addNBR).select('NBR').median();
+  return ee.Image.constant(year).toFloat().addBands(nbr).rename(['year','NBR']);
+}
+
+// slope fit 2018-2020: bulk Portuguese reburns happened in the 2022-2023 drought,
+// so a slope fitted across the full window would be partly driven by NBR collapses
+// caused by the very reburn events the model is predicting (temporal leakage).
+var slopeYears = [2018, 2019, 2020];
+var nbrSeries = ee.ImageCollection(slopeYears.map(summerNBR));
+var recoveryFit = nbrSeries.reduce(ee.Reducer.linearFit());
+var NBR_slope = recoveryFit.select('scale').rename('NBR_slope');
+var NBR_offset = recoveryFit.select('offset').rename('NBR_offset');
 // Each team member appends their assigned section below in order.
 // Refer to TASK_SPLIT.md for the section ownership map and the code for each Part.
