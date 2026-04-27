@@ -1029,7 +1029,9 @@ if (USE_ASSET) {
       }),
       chart
     ]);
-      // Top 5 priority concelhos
+  }
+
+  // Top 5 priority concelhos
     sidebar.add(ui.Label('2. AGIF decision support',{
       fontWeight:'bold', fontSize:'13px', margin:'14px 0 4px 0', color:'#333'
     }));
