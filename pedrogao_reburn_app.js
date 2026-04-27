@@ -513,3 +513,520 @@ if (USE_ASSET) {
     description: 'priority_pixels_top5pct_csv',
     fileFormat: 'CSV'
   });
+   // UI
+  // SATELLITE no road labels gives the cleanest backdrop for the data layers.
+  Map.setOptions('SATELLITE');
+  Map.style().set('cursor','crosshair');
+  Map.centerObject(aoi_burn, 9);
+
+  // Hide native controls except zoom and layer-list. Zoom is retained because
+  // the four fire polygons are geographically separated and users need to
+  // navigate between them.
+  Map.setControlVisibility({all: false, layerList: true, zoomControl: true});
+  Map.drawingTools().setShown(false);
+
+  // Single white stroke and black halo for all 4 fires.
+  // Differentiation lives in the sidebar legend numbered 1-4 by area, not in colour.
+  var allFiresFC = burn_vector_2017.sort('AreaHaPoly', false);
+  var sortedFireList = allFiresFC.toList(99);
+  var firePolyFCs = [0,1,2,3].map(function(i){
+    return ee.FeatureCollection([ee.Feature(sortedFireList.get(i))]);
+  });
+
+  // Bundled fireGeoms evaluate: pre-evaluate fire geometries to plain JS GeoJSON
+  // once at startup so setActiveFire can call ee.Geometry(jsGeom) synchronously
+  // at click time. Bundled into ONE evaluate (was 4 separate round trips) so
+  // GEE resolves all four geoms in a single compute graph, ~5-10s saved.
+  var fireGeoms = [null, null, null, null];
+  ee.Dictionary({
+    g0: firePolyFCs[0].geometry(),
+    g1: firePolyFCs[1].geometry(),
+    g2: firePolyFCs[2].geometry(),
+    g3: firePolyFCs[3].geometry()
+  }).evaluate(function(d, err){
+    if (err || !d) return;
+    fireGeoms[0] = d.g0; fireGeoms[1] = d.g1;
+    fireGeoms[2] = d.g2; fireGeoms[3] = d.g3;
+  });
+  // Morphological closing +150m / -150m fills internal unburned pockets <300m
+  // so the perimeter doesn't paint noisy finger outlines.
+  var allFiresFCClean = allFiresFC.map(function(f){
+    return f.setGeometry(f.geometry().buffer(150, 30).buffer(-150, 30));
+  });
+  var firesHalo = ee.Image().byte().paint(allFiresFCClean, 1, 3).selfMask();
+  var firesStroke = ee.Image().byte().paint(allFiresFCClean, 1, 1).selfMask();
+
+  // Top-center floating label shows the current focus name (fire or concelho).
+  // GEE has no on-map text-at-lat-lng widget.
+  var contextLabel = ui.Label('', {
+    fontWeight: 'bold', fontSize: '13px', color:'#222',
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    padding: '6px 14px', margin: '8px', textAlign:'center'
+  });
+  contextLabel.style().set({position: 'top-center', shown: false});
+  Map.add(contextLabel);
+  function setContextLabel(text){
+    if (text) {
+      contextLabel.setValue(text);
+      contextLabel.style().set('shown', true);
+    } else {
+      contextLabel.style().set('shown', false);
+    }
+  }
+
+  // 5-class warm-orange ramp cream -> burnt orange.
+  // Single hue, brighter = more risk, harmonises with olive satellite tiles.
+  // Inferno was tried first but its deep purple low values were misread as high
+  // intensity in lay user tests (Crameri et al. 2020 colour misuse warning).
+  var HAZ5 = ['#fff4d6','#ffcb7d','#fb9646','#e85d04','#b54200'];
+
+  // Stage E swap: when USE_RGB_ASSET is true the two heaviest hazard layers
+  // are served as pre-baked RGB Uint8 tiles. GEE skips the per-tile classify
+  // + palette + encode pipeline, the dominant cold-start cost.
+  var class5_display = USE_RGB_ASSET
+    ? ee.Image(CLASS5_RGB_ASSET)
+    : reburnClass.clip(aoi_burn);
+  var class5_vis = USE_RGB_ASSET ? {} : {min:1, max:5, palette: HAZ5};
+  var prob_display = USE_RGB_ASSET
+    ? ee.Image(PROB_RGB_ASSET)
+    : reburnProb.clip(aoi_burn);
+  var prob_vis = USE_RGB_ASSET ? {} : {min:0, max:1, palette: HAZ5};
+
+  var LAYER_CONFIG = {
+    'class': {
+      name:'Reburn susceptibility class',
+      image: class5_display, vis: class5_vis,
+      legendLabels:['Very low','Low','Moderate','High','Very high'],
+      legendPalette: HAZ5
+    },
+    'prob': {
+      name:'Reburn probability (0-1)',
+      image: prob_display, vis: prob_vis,
+      legendLabels:['0.0','0.25','0.5','0.75','1.0'],
+      legendPalette: HAZ5
+    },
+    'dnbr': {
+      // ColorBrewer Oranges, separate hue family from the model-output Reds
+      // so users see at a glance this is an INPUT, not the prediction.
+      name:'2017 burn severity (dNBR)',
+      image: dNBR_2017.clip(aoi_burn),
+      vis:{min:0, max:1000, palette:['#feedde','#fdbe85','#fd8d3c','#e6550d','#a63603']},
+      legendLabels:['0','250','500','750','1000'],
+      legendPalette:['#feedde','#fdbe85','#fd8d3c','#e6550d','#a63603']
+    },
+    'slope_rec': {
+      // Diverging RdYlGn: green = vegetation regrowth, red = degradation.
+      name:'NBR recovery slope 2018-2020',
+      image: NBR_slope.clip(aoi_burn),
+      vis:{min:-0.05, max:0.05, palette:['#d7191c','#fdae61','#ffffbf','#a6d96a','#1a9850']},
+      legendLabels:['Degradation','','No change','','Recovery'],
+      legendPalette:['#d7191c','#fdae61','#ffffbf','#a6d96a','#1a9850']
+    },
+    'ndmi': {
+      // BrBG diverging. Brown = dry, teal = wet.
+      name:'2025 fuel moisture (NDMI min)',
+      image: NDMI_2025_min.clip(aoi_burn),
+      vis:{min:-0.2, max:0.4, palette:['#8c510a','#d8b365','#f6e8c3','#5ab4ac','#01665e']},
+      legendLabels:['Dry','','Mid','','Wet'],
+      legendPalette:['#8c510a','#d8b365','#f6e8c3','#5ab4ac','#01665e']
+    },
+    'lst': {
+      // ColorBrewer Reds. heat=red is unambiguous and decouples LST from the
+      // hazard layers visually.
+      name:'2025 maximum LST (C)',
+      image: LST_2025_max.clip(aoi_burn),
+      vis:{min:25, max:50, palette:['#fee5d9','#fcae91','#fb6a4a','#de2d26','#a50f15']},
+      legendLabels:['25','31','37','43','50'],
+      legendPalette:['#fee5d9','#fcae91','#fb6a4a','#de2d26','#a50f15']
+    },
+    'muni_priority_ha': {
+      name:'Município priority area (ha)',
+      image: muniChoroPriority,
+      vis:{min:0, max:2000, palette: HAZ5},
+      legendLabels:['0','500','1000','1500','2000+'],
+      legendPalette: HAZ5
+    },
+    'muni_pct': {
+      name:'Municipality % High+VeryHigh cells',
+      image: muniChoropct,
+      vis:{min:0, max:1, palette: HAZ5},
+      legendLabels:['0%','25%','50%','75%','100%'],
+      legendPalette: HAZ5
+    }
+  };
+
+  // Sidebar
+  var sidebar = ui.Panel({style:{width:'400px', padding:'12px'}});
+
+  sidebar.add(ui.Label('Pedrógão Grande Reburn Susceptibility',{
+    fontSize:'20px', fontWeight:'bold', margin:'0 0 4px 0'
+  }));
+  sidebar.add(ui.Label('CASA0025 final project | central Portugal, 2017 footprint',{
+    fontSize:'11px', color:'#666', margin:'0 0 10px 0'
+  }));
+  sidebar.add(ui.Label(
+    'Maps reburn susceptibility within the 2017 Pedrógão Grande fire ' +
+    'footprint ahead of the 2026 fire season. A random forest trained on ' +
+    'ICNF 2018-2025 reburn perimeters is conditioned on recovery state, ' +
+    '2017 burn severity, 2025 fuel state, and topography. ' +
+    'Intended user: AGIF fuel-reduction prioritisation.',
+    {fontSize:'11px', margin:'0 0 12px 0'}
+  ));
+
+  sidebar.add(ui.Label('Four 2017 fire events',{
+    fontWeight:'bold', fontSize:'11px', margin:'0 0 2px 0'
+  }));
+  sidebar.add(ui.Label('Click a row to spotlight that fire; click again to clear.',{
+    fontSize:'9px', color:'#888', margin:'0 0 4px 0', fontStyle:'italic'
+  }));
+  var firesPanel = ui.Panel({style:{padding:'4px 6px', backgroundColor:'#f7f7f7', margin:'0 0 10px 0'}});
+
+  // Numbered by area rank (1 = largest). Differentiation via badge, name, area,
+  // not via colour. All four polygons share one neutral white stroke on the map.
+  var FIRE_ROWS = [
+    [0, 'Mação (Sobreira Formosa)','33,712 ha','23 Jul 2017'],
+    [1, 'Pedrógão Grande (main)', '30,618 ha','17 Jun 2017'],
+    [2, 'Góis / Arganil', '17,432 ha','17 Jun 2017'],
+    [3, 'Abrantes (small)', ' 1,258 ha','17 Jun 2017']
+  ];
+
+  var activeFire = -1;
+  var fireRowPanels = [];
+  var fireRowButtons = [];
+
+  // SE-offset drop shadow inserted between aoiDim and the data layer.
+  // The data layer hides the original polygon, leaving only the offset edge.
+  // Built by client-side coordinate offset on the JS-evaluated GeoJSON because
+  // ee.Geometry.translate is not exposed on chained Geometry in the JS client.
+  var focusShadow = null;
+
+  // 180 m SE offset converted to degrees at ~40 N (central Portugal):
+  // 1 deg lng ~ 85 km, 1 deg lat ~ 111 km.
+  var SHADOW_DLNG = 180 / 85000;
+  var SHADOW_DLAT = -180 / 111000;
+  function offsetCoords(c) {
+    if (typeof c[0] === 'number') return [c[0] + SHADOW_DLNG, c[1] + SHADOW_DLAT];
+    return c.map(offsetCoords);
+  }
+  function offsetGeoJSON(g) {
+    if (g.type === 'GeometryCollection') {
+      return {type:'GeometryCollection', geometries: g.geometries.map(offsetGeoJSON)};
+    }
+    return {type: g.type, coordinates: offsetCoords(g.coordinates)};
+  }
+
+  function setActiveFire(id) {
+    activeFire = (activeFire === id) ? -1 : id;
+    fireRowPanels.forEach(function(p, i){
+      p.style().set('backgroundColor', (i === activeFire) ? '#FFE0B2' : '#f7f7f7');
+    });
+    fireRowButtons.forEach(function(b, i){
+      b.setLabel((i === activeFire) ? 'reset' : 'focus');
+    });
+    if (focusShadow) { Map.layers().remove(focusShadow); focusShadow = null; }
+    if (activeFire >= 0 && fireGeoms[activeFire]) {
+      var jsGeom = fireGeoms[activeFire];
+      var geom = ee.Geometry(jsGeom);
+      var shadowGeom = ee.Geometry(offsetGeoJSON(jsGeom))
+                         .buffer(150, 30).buffer(-150, 30);
+      var shadowFC = ee.FeatureCollection([ee.Feature(shadowGeom)]);
+      var shadowImg = ee.Image().byte().paint(shadowFC, 1).selfMask();
+      focusShadow = ui.Map.Layer(shadowImg, {palette:['#000000']},
+        'focus drop shadow', true, 0.45);
+      Map.layers().insert(1, focusShadow);
+      Map.centerObject(geom, 11);
+      setContextLabel('Fire: ' + FIRE_ROWS[activeFire][1]);
+    } else {
+      Map.centerObject(aoi_burn, 9);
+      setContextLabel(null);
+    }
+  }
+
+  FIRE_ROWS.forEach(function(row){
+    var r = ui.Panel({
+      layout: ui.Panel.Layout.flow('horizontal'),
+      style:{margin:'1px 0', padding:'3px 4px', backgroundColor:'#f7f7f7'}
+    });
+    r.add(ui.Label((row[0]+1)+'',{
+      fontSize:'10px', fontWeight:'bold', color:'#fff', backgroundColor:'#222',
+      width:'18px', textAlign:'center',
+      margin:'6px 8px 0 0', padding:'2px 0'
+    }));
+    r.add(ui.Label(row[1],{fontSize:'10px', margin:'0', padding:'7px 0 0 0', width:'150px'}));
+    r.add(ui.Label(row[2],{fontSize:'10px', margin:'0', padding:'7px 0 0 0', width:'58px', color:'#555'}));
+    r.add(ui.Label(row[3],{fontSize:'10px', margin:'0', padding:'7px 0 0 0', color:'#555'}));
+    var btn = ui.Button({
+      label: 'focus',
+      style:{margin:'2px 0 0 4px', padding:'0 4px'},
+      onClick: (function(fid){ return function(){ setActiveFire(fid); }; })(row[0])
+    });
+    r.add(btn);
+    fireRowPanels.push(r);
+    fireRowButtons.push(btn);
+    firesPanel.add(r);
+  });
+  sidebar.add(firesPanel);
+
+  // 1. Map view: pixel layer + município overlay dropdowns
+  sidebar.add(ui.Label('1. Map view',{
+    fontWeight:'bold', fontSize:'13px', margin:'8px 0 4px 0', color:'#333'
+  }));
+  sidebar.add(ui.Label('1a. Pixel layer (100 m)',{fontWeight:'bold', margin:'4px 0 4px 0'}));
+  var layerSelect = ui.Select({
+    items:[
+      {label:'Reburn susceptibility class', value:'class'},
+      {label:'Reburn probability (0-1)', value:'prob'},
+      {label:'2017 burn severity (dNBR)', value:'dnbr'},
+      {label:'NBR recovery slope', value:'slope_rec'},
+      {label:'2025 fuel moisture (NDMI)', value:'ndmi'},
+      {label:'2025 LST max', value:'lst'}
+    ],
+    value:'class', style:{stretch:'horizontal'}
+  });
+  sidebar.add(layerSelect);
+  var layerHint = ui.Label('5-class risk (quantile breaks at p20/40/60/80).',{
+    fontSize:'9px', color:'#666', margin:'2px 0 0 4px', fontStyle:'italic'
+  });
+  sidebar.add(layerHint);
+
+  sidebar.add(ui.Label('1b. Município overlay',{fontWeight:'bold', margin:'8px 0 4px 0'}));
+  var muniSelect = ui.Select({
+    items:[
+      {label:'None (outlines only)', value:'none'},
+      {label:'Priority area per concelho (ha) - AGIF KPI', value:'muni_priority_ha'},
+      {label:'% high-risk pixels', value:'muni_pct'}
+    ],
+    value:'none', style:{stretch:'horizontal'}
+  });
+  sidebar.add(muniSelect);
+  var muniHint = ui.Label('Outlines only.',{
+    fontSize:'9px', color:'#666', margin:'2px 0 0 4px', fontStyle:'italic'
+  });
+  sidebar.add(muniHint);
+
+  // refreshLegend rebuilds the legend swatch row from LAYER_CONFIG.
+  function refreshLegend(key) {
+    legendPanel.clear();
+    var cfg = LAYER_CONFIG[key];
+    legendPanel.add(ui.Label(cfg.name,{fontWeight:'bold', fontSize:'11px', margin:'0 0 4px 0'}));
+    var swatchRow = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')});
+    cfg.legendPalette.forEach(function(c){
+      swatchRow.add(ui.Label('',{
+        backgroundColor:c, padding:'8px', margin:'0 2px 0 0',
+        border:'1px solid #999', width:'34px', height:'14px'
+      }));
+    });
+    legendPanel.add(swatchRow);
+    var labelRow = ui.Panel({layout: ui.Panel.Layout.flow('horizontal')});
+    cfg.legendLabels.forEach(function(l){
+      labelRow.add(ui.Label(l,{fontSize:'9px', margin:'0 6px 0 0', width:'34px', textAlign:'center'}));
+    });
+    legendPanel.add(labelRow);
+  }
+
+  // AOI dim mask: 30% black inside the burn footprint to lift data contrast
+  // against the satellite green basemap.
+  var aoiDim = ee.Image().byte().paint(burn_vector_2017, 1).selfMask();
+
+  function refreshMap() {
+    Map.layers().reset();
+    var pixelKey = layerSelect.getValue();
+    var muniKey = muniSelect.getValue();
+    var cfg = LAYER_CONFIG[pixelKey];
+
+    // 1. AOI dim mask
+    Map.addLayer(aoiDim, {palette:['#000000']}, 'AOI dim', true, 0.30);
+
+    // 2. Focus drop-shadow (sits BELOW data so only SE-offset edge is visible)
+    if (focusShadow) Map.layers().add(focusShadow);
+
+    // 3. Main pixel data layer
+    Map.addLayer(cfg.image, cfg.vis, cfg.name, true, 0.82);
+
+    // 4. Optional município choropleth overlay
+    if (muniKey !== 'none') {
+      var mcfg = LAYER_CONFIG[muniKey];
+      Map.addLayer(mcfg.image, mcfg.vis, mcfg.name, true, 0.50);
+    }
+
+    // 5. Faint full-Portugal concelho outlines for low-zoom orientation
+    Map.addLayer(muniOutlineAll, {palette:['#cccccc']},
+      'All Portugal concelhos (faint)', true, 0.45);
+
+    // 6. Soft warm fill on burn-adjacent concelho parts outside the burn
+    Map.addLayer(muniIntersectFill, {palette:['#FFCC80']},
+      'Burn-adjacent concelhos (fill)', true, 0.32);
+
+    // 7. Burn-adjacent concelhos drawn at full polygon extent boundary
+    Map.addLayer(muniBoundaryOutline, {palette:['#1a1a1a']},
+      'Burn-adjacent concelhos (outline)', true, 0.85);
+
+    // 8. 2017 fire perimeters: black halo first, white stroke on top.
+    Map.addLayer(firesHalo, {palette:['#000000']}, '2017 fire perimeters (halo)', true, 0.55);
+    Map.addLayer(firesStroke, {palette:['#ffffff']}, '2017 fire perimeters', true, 0.95);
+
+    // 9. Treatment-priority Top-X% mask if active
+    if (priorityLayer) Map.layers().add(priorityLayer);
+  }
+
+  var LAYER_HINTS = {
+    'class': '5-class risk (quantile breaks at p20/40/60/80).',
+    'prob': 'Random-forest output probability, 0 to 1.',
+    'dnbr': 'Initial burn severity: high = trees killed in 2017.',
+    'slope_rec': 'Vegetation recovery rate 2018-2020 (pre-drought window).',
+    'ndmi': 'Fuel moisture in 2025 summer minimum; lower = drier.',
+    'lst': '2025 summer maximum land-surface temperature.'
+  };
+  var MUNI_HINTS = {
+    'none': 'Outlines only.',
+    'muni_priority_ha': 'Priority hectares per concelho - matches AGIF "treat N ha" budget language.',
+    'muni_pct': 'Share of pixels classified High or Very High.'
+  };
+
+  // Click inspector panel
+  sidebar.add(ui.Label('4. Inspect a location',{
+    fontWeight:'bold', fontSize:'13px', margin:'14px 0 4px 0', color:'#333'
+  }));
+  sidebar.add(ui.Label('Click anywhere on the map. A cyan marker highlights the pixel; summary + values update in the cards below.',{
+    fontSize:'10px', color:'#666', margin:'0 0 6px 0'
+  }));
+
+  var clickInfo = ui.Panel({style:{padding:'6px', backgroundColor:'#f4f4f4', margin:'0 0 8px 0'}});
+  clickInfo.add(ui.Label('(click a point to see pixel values)',{
+    fontSize:'10px', color:'#999', margin:'0'
+  }));
+  sidebar.add(clickInfo);
+
+  var chartPanel = ui.Panel({style:{margin:'0 0 10px 0'}});
+  sidebar.add(chartPanel);
+
+  var clickMarker = null;
+
+  var resetBtn = ui.Button({
+    label: 'Clear inspection',
+    onClick: function(){
+      clickInfo.clear();
+      clickInfo.add(ui.Label('(click a point to see pixel values)',{
+        fontSize:'10px', color:'#999', margin:'0'
+      }));
+      chartPanel.clear();
+      if (clickMarker) { Map.layers().remove(clickMarker); clickMarker = null; }
+      setContextLabel(null);
+    },
+    style: {stretch:'horizontal', margin:'0 0 10px 0'}
+  });
+  sidebar.add(resetBtn);
+
+  // Full 8-year window for the trajectory chart. slope fit stays 2018-2020
+  // to avoid temporal leakage from drought-year reburns.
+  var trajectoryYears = [2018,2019,2020,2021,2022,2023,2024,2025];
+  var nbrCol = ee.ImageCollection(trajectoryYears.map(function(y){
+    var nbr = s2_with_cs.filterDate(y + '-06-01', y + '-09-30')
+      .map(maskAndScale).map(addNBR).select('NBR').median().rename('NBR');
+    return nbr.set('system:time_start', ee.Date(y + '-08-01').millis());
+  }));
+
+  Map.onClick(function(coords){
+    var point = ee.Geometry.Point([coords.lon, coords.lat]);
+
+    if (clickMarker) Map.layers().remove(clickMarker);
+    clickMarker = Map.addLayer(point.buffer(100), {color:'00FFFF'}, 'click-marker');
+
+    clickInfo.clear();
+    chartPanel.clear();
+    clickInfo.add(ui.Label('Checking location...',{color:'#666', fontSize:'11px'}));
+
+    // Boundary check: stop early if outside the 2017 footprint, otherwise
+    // the user gets silent failure and assumes the App is broken.
+    aoi_burn.contains(point, 1).evaluate(function(inside){
+      if (!inside) {
+        clickInfo.clear();
+        clickInfo.add(ui.Label('Click outside the 2017 burn footprint.',{
+          color:'#c00', fontSize:'11px', fontWeight:'bold', margin:'0 0 4px 0'
+        }));
+        clickInfo.add(ui.Label('The model only applies inside the coloured polygons.',{
+          color:'#666', fontSize:'10px'
+        }));
+        return;
+      }
+      runPixelInspector(point, coords);
+    });
+  });
+
+  function runPixelInspector(point, coords) {
+    clickInfo.clear();
+    clickInfo.add(ui.Label('Pixel values at click:',{
+      fontWeight:'bold', fontSize:'10px', margin:'0 0 4px 0', color:'#333'
+    }));
+
+    var sampleImg = predictors.addBands(reburnProb).addBands(reburnClass);
+    sampleImg.reduceRegion({
+      reducer: ee.Reducer.first(),
+      geometry: point, scale: 100, crs: TARGET_PROJ
+    }).evaluate(function(res){
+      if (!res) {
+        clickInfo.add(ui.Label('No pixel data here (likely cloud-masked).',{color:'#c00', fontSize:'11px'}));
+        return;
+      }
+      var classNames = ['n/a','Very low','Low','Moderate','High','Very high'];
+      function fmt(v,d){ return (v==null) ? 'n/a' : Number(v).toFixed(d); }
+      var rows = [
+        ['Lat, Lon', coords.lat.toFixed(4) + ', ' + coords.lon.toFixed(4)],
+        ['Município', '...'],
+        ['Reburn probability', fmt(res.reburn_prob, 3)],
+        ['Susceptibility class', res.reburn_class != null ? classNames[Math.round(res.reburn_class)] : 'n/a'],
+        ['2017 burn severity', fmt(res.dNBR_2017, 0)],
+        ['Recovery slope', fmt(res.NBR_slope, 4)],
+        ['2025 NDVI', fmt(res.NDVI_2025, 3)],
+        ['2025 fuel moisture', fmt(res.NDMI_2025_min, 3)],
+        ['2025 max LST (C)', fmt(res.LST_2025_max, 1)],
+        ['Aspect (deg)', fmt(res.aspect, 1)],
+        ['Elevation (m)', fmt(res.elevation, 0)]
+      ];
+      var muniValueLabels = [];
+      rows.forEach(function(r, idx){
+        var row = ui.Panel({layout: ui.Panel.Layout.flow('horizontal'), style:{margin:'0'}});
+        row.add(ui.Label(r[0] + ':',{fontSize:'10px', margin:'0', width:'150px', color:'#333'}));
+        var valLbl = ui.Label(r[1],{fontSize:'10px', margin:'0', fontWeight:'bold'});
+        if (r[0] === 'Município') {
+          valLbl.style().set({color:'#e65100'});
+          muniValueLabels.push(valLbl);
+        }
+        row.add(valLbl);
+        clickInfo.add(row);
+      });
+
+      muniStats.filterBounds(point).first().evaluate(function(m){
+        var name = (m && m.properties && m.properties.ADM2_NAME) || 'outside any concelho';
+        muniValueLabels.forEach(function(l){ l.setValue(name); });
+      });
+    });
+
+    chartPanel.clear();
+    chartPanel.add(ui.Label('NBR recovery trajectory 2018-2025',{
+      fontWeight:'bold', fontSize:'11px', margin:'8px 0 4px 0'
+    }));
+    chartPanel.add(ui.Label('(building chart, ~3s)',{
+      color:'#999', fontSize:'10px', margin:'0 0 4px 0'
+    }));
+
+    var chart = ui.Chart.image.series({
+      imageCollection: nbrCol, region: point,
+      reducer: ee.Reducer.first(), scale: 100,
+      xProperty: 'system:time_start'
+    }).setOptions({
+      title: 'NBR at clicked pixel',
+      vAxis: {title:'NBR', viewWindow:{min:-0.5, max:1}},
+      hAxis: {title:''},
+      legend: {position:'none'},
+      lineWidth: 2, pointSize: 5,
+      colors: ['#1a9850'],
+      height: 180, chartArea: {left:50, top:30, width:'70%', height:'60%'}
+    });
+    chartPanel.widgets().reset([
+      ui.Label('NBR recovery trajectory 2018-2025',{
+        fontWeight:'bold', fontSize:'11px', margin:'8px 0 4px 0'
+      }),
+      chart
+    ]);
+  }
