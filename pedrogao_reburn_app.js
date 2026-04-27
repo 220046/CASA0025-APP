@@ -84,5 +84,26 @@ var nbrSeries = ee.ImageCollection(slopeYears.map(summerNBR));
 var recoveryFit = nbrSeries.reduce(ee.Reducer.linearFit());
 var NBR_slope = recoveryFit.select('scale').rename('NBR_slope');
 var NBR_offset = recoveryFit.select('offset').rename('NBR_offset');
+var s2_2025 = s2_with_cs.filterDate('2025-06-01','2025-09-30')
+  .map(maskAndScale).map(addNBR).map(addNDMI).map(addNDVI);
+var NDVI_2025 = s2_2025.select('NDVI').median().rename('NDVI_2025');
+var NDMI_2025_min = s2_2025.select('NDMI').min().rename('NDMI_2025_min');
+
+function landsatLST(img) {
+  var qa = img.select('QA_PIXEL');
+  // mask cloud bit 3 and cloud shadow bit 4. Cirrus bit 2 kept because its
+  // effect on ST_B10 is minimal and aggressive QA masking drops valid pixels.
+  var clear = qa.bitwiseAnd(1 << 3).eq(0).and(qa.bitwiseAnd(1 << 4).eq(0));
+  return img.select('ST_B10').multiply(0.00341802).add(149.0).subtract(273.15)
+    .updateMask(clear).rename('LST');
+}
+var L8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2');
+var L9 = ee.ImageCollection('LANDSAT/LC09/C02/T1_L2');
+// .max captures fire-danger heat extremes (Yebra 2013), not summer-average
+// warming. CLOUD_COVER<60 prefilter on Landsat C2.
+var LST_2025_max = L8.merge(L9)
+  .filterDate('2025-06-01','2025-09-30').filterBounds(aoi_burn)
+  .filter(ee.Filter.lt('CLOUD_COVER', 60))
+  .map(landsatLST).max().rename('LST_2025_max');
 // Each team member appends their assigned section below in order.
 // Refer to TASK_SPLIT.md for the section ownership map and the code for each Part.
