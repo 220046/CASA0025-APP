@@ -1029,4 +1029,623 @@ if (USE_ASSET) {
       }),
       chart
     ]);
+      // Top 5 priority concelhos
+    sidebar.add(ui.Label('2. AGIF decision support',{
+      fontWeight:'bold', fontSize:'13px', margin:'14px 0 4px 0', color:'#333'
+    }));
+    sidebar.add(ui.Label('2a. Top 5 priority concelhos',{
+      fontWeight:'bold', margin:'4px 0 4px 0'
+    }));
+    sidebar.add(ui.Label('Ranked by priority hectares (high+very-high share x concelho area).',{
+      fontSize:'9px', color:'#888', margin:'0 0 4px 0', fontStyle:'italic'
+    }));
+    var top5Panel = ui.Panel({
+      style:{padding:'4px', backgroundColor:'#ffffff',
+             border:'1px solid #ddd', margin:'0 0 4px 0'}
+    });
+    top5Panel.add(ui.Label('loading ranking...',{fontSize:'10px', color:'#999', margin:'0'}));
+    sidebar.add(top5Panel);
+  
+    // Shared summary card: populated when user clicks a Top 5 row, also when
+    // the pixel inspector resolves a concelho name. Single card avoids two
+    // cards showing different concelhos at once.
+    var concelhoSummaryCard = ui.Panel({
+      style:{padding:'8px 10px', backgroundColor:'#fff8e1',
+             border:'2px solid #ff9800', margin:'0 0 8px 0'}
+    });
+    concelhoSummaryCard.add(ui.Label('Click a row above to see its operational summary.',{
+      fontSize:'10px', color:'#888', margin:'0'
+    }));
+    sidebar.add(concelhoSummaryCard);
+  
+    function fillConcelhoSummary(p, name){
+      concelhoSummaryCard.clear();
+      var areaHa = Math.round(p.area_in_burn_ha || 0);
+      var meanProb = p.mean_reburn_prob != null ? p.mean_reburn_prob.toFixed(3) : 'n/a';
+      var pctHigh = p.pct_high_class != null ? p.pct_high_class : 0;
+      var priorityHa = Math.round(pctHigh * areaHa);
+      concelhoSummaryCard.add(ui.Label('Concelho: ' + name,{
+        fontWeight:'bold', fontSize:'12px', color:'#e65100', margin:'0 0 4px 0'
+      }));
+      concelhoSummaryCard.add(ui.Label('Area in 2017 burn footprint: ' + areaHa + ' ha',{
+        fontSize:'11px', margin:'0'
+      }));
+      concelhoSummaryCard.add(ui.Label('Mean reburn probability: ' + meanProb,{
+        fontSize:'11px', margin:'0'
+      }));
+      concelhoSummaryCard.add(ui.Label('High/Very-High share: ' + (pctHigh*100).toFixed(1) + '%',{
+        fontSize:'11px', margin:'0'
+      }));
+      concelhoSummaryCard.add(ui.Label('~' + priorityHa + ' ha for priority fuel-reduction treatment',{
+        fontSize:'11px', margin:'4px 0 0 0', fontWeight:'bold', color:'#bf360c'
+      }));
+    }
+  
+    muniStats.sort('priority_ha', false).limit(5).evaluate(function(fc){
+      top5Panel.clear();
+      if (!fc || !fc.features || fc.features.length === 0) {
+        top5Panel.add(ui.Label('No data.',{fontSize:'10px', color:'#999'}));
+        return;
+      }
+      fc.features.forEach(function(f, i){
+        var p = f.properties;
+        var name = p.ADM2_NAME || 'Unknown';
+        var ha = Math.round(p.priority_ha || 0);
+        var bg = (i === 0) ? '#ffe0b2' : (i === 1 ? '#fff3e0' : '#fafafa');
+        var row = ui.Panel({
+          layout: ui.Panel.Layout.flow('horizontal'),
+          style:{margin:'1px 0', padding:'2px 4px', backgroundColor: bg}
+        });
+        row.add(ui.Label('#' + (i+1),{
+          fontWeight:'bold', fontSize:'10px', width:'24px', color:'#bf360c'
+        }));
+        row.add(ui.Label(name,{fontSize:'10px', margin:'0', width:'160px'}));
+        row.add(ui.Label(ha + ' ha',{
+          fontSize:'10px', margin:'0', width:'58px', color:'#555', fontWeight:'bold'
+        }));
+        var btn = ui.Button({
+          label: 'view',
+          style:{margin:'0 0 0 4px', padding:'0 4px'},
+          onClick: (function(featRef, nm){
+            return function(){
+              Map.centerObject(ee.Geometry(featRef.geometry), 12);
+              fillConcelhoSummary(featRef.properties, nm);
+              setContextLabel('Concelho: ' + nm);
+            };
+          })(f, name)
+        });
+        row.add(btn);
+        top5Panel.add(row);
+      });
+    });
+  
+    // Treatment priority filter (Top X% via discrete Select)
+    // Discrete percentile filter 5/10/20/30/50% for budget-sized AOI subsets.
+    sidebar.add(ui.Label('2b. Treatment priority filter',{
+      fontWeight:'bold', margin:'10px 0 4px 0'
+    }));
+    sidebar.add(ui.Label('Mask all but the top X% of pixels - sized to your annual budget.',{
+      fontSize:'9px', color:'#888', margin:'0 0 4px 0', fontStyle:'italic'
+    }));
+    var priorityLayer = null;
+    var priorityHintLbl = ui.Label('No filter - full pixel layer shown.',{
+      fontSize:'9px', color:'#666', margin:'2px 0 0 4px', fontStyle:'italic'
+    });
+    var prioritySelect = ui.Select({
+      items: [
+        {label: 'No filter (full map)', value: '0'},
+        {label: 'Top 5% (highest priority)', value: '5'},
+        {label: 'Top 10%', value: '10'},
+        {label: 'Top 20%', value: '20'},
+        {label: 'Top 30%', value: '30'},
+        {label: 'Top 50%', value: '50'}
+      ],
+      value: '0',
+      style: {stretch:'horizontal'},
+      onChange: function(pctStr){
+        if (priorityLayer) {
+          Map.layers().remove(priorityLayer);
+          priorityLayer = null;
+        }
+        var pct = Number(pctStr);
+        if (pct === 0) {
+          priorityHintLbl.setValue('No filter - full pixel layer shown.');
+          return;
+        }
+        var pKey = 'reburn_prob_p' + (100 - pct);
+        var thresh = ee.Number(priorityPercentiles.get(pKey));
+        var mask = reburnProb.gte(thresh).selfMask();
+        priorityLayer = ui.Map.Layer(mask,
+          {palette:['#bf360c']},
+          'Top ' + pct + '% priority',
+          true, 0.92);
+        Map.layers().add(priorityLayer);
+        var approxHa = Math.round(pct / 100 * 83000);
+        priorityHintLbl.setValue(
+          '~ ' + approxHa + ' ha highlighted - top ' + pct + '% of model probability.'
+        );
+      }
+    });
+    sidebar.add(prioritySelect);
+    sidebar.add(priorityHintLbl);
+  
+    // Legend container (referenced by refreshLegend in Part 4)
+    var legendPanel = ui.Panel({style:{margin:'8px 0', padding:'6px', backgroundColor:'#fafafa'}});
+    sidebar.add(legendPanel);
+  
+    // Split-view: two predictors side-by-side; default = recovery slope vs prob.
+    var splitView = null;
+    var splitContainer = null;
+    var splitLeftMap = null;
+    var splitRightMap = null;
+    var splitLeftSelect = null;
+    var splitRightSelect = null;
+  
+    // pixel-level layers eligible for split comparison; skip muni_* aggregates.
+    var SPLIT_KEYS = ['prob', 'class', 'dnbr', 'slope_rec', 'ndmi', 'lst'];
+  
+    // Static layers (AOI dim, fire halo, fire stroke) are key-independent and
+    // built once per map. Only the predictor layer at index 1 changes on
+    // dropdown / preset clicks. Same-key calls are no-ops to avoid redundant
+    // tile generation.
+    function refreshSplitMap(m, key){
+      var cfg = LAYER_CONFIG[key];
+      if (m.layers().length() === 0) {
+        m.addLayer(aoiDim, {palette:['#000000']}, 'AOI dim', true, 0.30);
+        m.addLayer(cfg.image, cfg.vis, cfg.name, true, 0.85);
+        m.addLayer(firesHalo, {palette:['#000000']}, 'halo', true, 0.55);
+        m.addLayer(firesStroke, {palette:['#ffffff']}, 'fires', true, 0.95);
+        m._splitKey = key;
+        return;
+      }
+      if (m._splitKey === key) return;
+      m.layers().set(1, ui.Map.Layer(cfg.image, cfg.vis, cfg.name, true, 0.85));
+      m._splitKey = key;
+    }
+  
+    function buildSplitView(){
+      splitLeftMap = ui.Map();
+      splitRightMap = ui.Map();
+      ui.Map.Linker([splitLeftMap, splitRightMap]);
+  
+      [splitLeftMap, splitRightMap].forEach(function(m){
+        m.setOptions('SATELLITE');
+        m.style().set('cursor','crosshair');
+        m.setControlVisibility({all:false, zoomControl:true});
+        m.drawingTools().setShown(false);
+      });
+  
+      var items = SPLIT_KEYS.map(function(k){
+        return {label: LAYER_CONFIG[k].name, value: k};
+      });
+  
+      splitLeftSelect = ui.Select({
+        items: items, value: 'slope_rec',
+        style: {margin:'0 12px 0 0'},
+        onChange: function(k){ refreshSplitMap(splitLeftMap, k); }
+      });
+      splitRightSelect = ui.Select({
+        items: items, value: 'prob',
+        style: {margin:'0 12px 0 0'},
+        onChange: function(k){ refreshSplitMap(splitRightMap, k); }
+      });
+  
+      var backBtn = ui.Button({
+        label: 'Back',
+        style: {margin:'0 16px 0 0', backgroundColor:'#ffffff', fontWeight:'bold'},
+        onClick: function(){
+          ui.root.widgets().reset(origRootWidgets);
+          Map.centerObject(aoi_burn, 9);
+        }
+      });
+  
+      var splitHeader = ui.Panel({
+        layout: ui.Panel.Layout.flow('horizontal'),
+        style: {backgroundColor:'#222', padding:'8px 12px', stretch:'horizontal'},
+        widgets: [
+          backBtn,
+          ui.Label('LEFT',{
+            color:'#fff', fontSize:'11px', fontWeight:'bold',
+            margin:'5px 4px 0 0', backgroundColor:'#222'
+          }),
+          splitLeftSelect,
+          ui.Label('vs',{
+            color:'#888', fontSize:'11px',
+            margin:'5px 10px 0 4px', backgroundColor:'#222'
+          }),
+          ui.Label('RIGHT',{
+            color:'#fff', fontSize:'11px', fontWeight:'bold',
+            margin:'5px 4px 0 0', backgroundColor:'#222'
+          }),
+          splitRightSelect,
+          ui.Label(' Drag the divider to compare any two predictors pixel-by-pixel.',{
+            color:'#bbb', fontSize:'10px', fontStyle:'italic',
+            margin:'5px 0 0 12px', backgroundColor:'#222'
+          })
+        ]
+      });
+  
+      splitView = ui.SplitPanel({
+        firstPanel: splitLeftMap, secondPanel: splitRightMap,
+        orientation: 'horizontal', wipe: true,
+        style: {stretch:'both'}
+      });
+  
+      splitContainer = ui.Panel({
+        widgets: [splitHeader, splitView],
+        layout: ui.Panel.Layout.flow('vertical'),
+        style: {stretch:'both', padding:'0', margin:'0'}
+      });
+  
+      refreshSplitMap(splitLeftMap, 'slope_rec');
+      refreshSplitMap(splitRightMap, 'prob');
+    }
+  
+    var splitCentered = false;
+  
+    function enterSplitView(leftKey, rightKey){
+      if (!splitContainer) buildSplitView();
+      ui.root.widgets().reset([splitContainer]);
+      if (leftKey) { splitLeftSelect.setValue(leftKey, true); refreshSplitMap(splitLeftMap, leftKey); }
+      if (rightKey) { splitRightSelect.setValue(rightKey, true); refreshSplitMap(splitRightMap, rightKey); }
+      if (!splitCentered) {
+        splitLeftMap.centerObject(aoi_burn, 9);
+        splitRightMap.centerObject(aoi_burn, 9);
+        splitCentered = true;
+      }
+    }
+  
+    // Single entry into split view. Inside the panel, the LEFT and RIGHT
+    // dropdowns let the planner pick any layer pair freely.
+    sidebar.add(ui.Label('3. Compare two layers (split view)',{
+      fontWeight:'bold', fontSize:'13px', margin:'14px 0 4px 0', color:'#333'
+    }));
+    sidebar.add(ui.Label('Opens a side-by-side wipe view. Dropdowns at the top of the ' +
+      'split panel let you pick any layer pair pixel-by-pixel.',{
+      fontSize:'9px', color:'#888', margin:'0 0 4px 0', fontStyle:'italic'
+    }));
+  
+    sidebar.add(ui.Button({
+      label: 'Open split view',
+      style: {stretch:'horizontal', margin:'2px 0 8px 0', backgroundColor:'#fff3e0'},
+      onClick: function(){ enterSplitView('slope_rec', 'prob'); }
+    }));
+  
+    // Wire layer + muni dropdown change handlers and initial render.
+    layerSelect.onChange(function(key){
+      refreshLegend(key); refreshMap();
+      layerHint.setValue(LAYER_HINTS[key]);
+    });
+    muniSelect.onChange(function(key){
+      refreshMap();
+      muniHint.setValue(MUNI_HINTS[key]);
+    });
+  
+    refreshLegend('class');
+    refreshMap();
+  
+    // 5. Model diagnostics (always expanded, no toggle)
+    sidebar.add(ui.Label('5. Model diagnostics',{
+      fontWeight:'bold', fontSize:'13px', margin:'14px 0 4px 0', color:'#333'
+    }));
+  
+    // Asset-based diagnostics: when USE_DIAG_ASSET is true, all RF importance,
+    // fast metrics, AUC rows, Brier, and PDP arrays are read from the
+    // precomputed diag_v6 FeatureCollection asset in ONE round trip. Replaces
+    // four separate live evaluate calls each re-running RF inference,
+    // dropping App cold start from ~120s to ~5-10s.
+    var diagResolved = null;
+    var diagWaiters = [];
+    function whenDiag(cb) {
+      if (diagResolved !== null) cb(diagResolved);
+      else diagWaiters.push(cb);
+    }
+    function parseFloatList(s) {
+      if (!s) return [];
+      return String(s).split(',').map(function(x){ return parseFloat(x); });
+    }
+    function parseStringList(s) {
+      if (!s) return [];
+      return String(s).split(',');
+    }
+    function parseMatrix(s) {
+      if (!s) return [];
+      return String(s).split(',').map(function(rowStr){
+        return rowStr.split('|').map(function(x){ return parseFloat(x); });
+      });
+    }
+    if (USE_DIAG_ASSET) {
+      ee.Feature(ee.FeatureCollection(DIAG_ASSET).first()).toDictionary().evaluate(function(d, err){
+        if (err) print('diag asset load error', err);
+        diagResolved = err ? {} : (d || {});
+        diagWaiters.forEach(function(cb){ cb(diagResolved); });
+        diagWaiters = [];
+      });
+    }
+  
+    // 5a. Feature importance bar chart
+    sidebar.add(ui.Label('5a. Feature importance (RF)',{fontWeight:'bold', margin:'4px 0 4px 0'}));
+    var impHost = ui.Panel({style:{margin:'0', padding:'0'}});
+    impHost.add(ui.Label('Computing feature importance...',{
+      fontSize:'10px', color:'#999', margin:'4px 0', fontStyle:'italic'
+    }));
+    sidebar.add(impHost);
+  
+    var PREDICTOR_LABELS = {
+      'dNBR_2017': '2017 burn severity',
+      'NBR_slope': 'Recovery slope',
+      'NBR_offset': 'Recovery offset',
+      'NDVI_2025': '2025 NDVI',
+      'NDMI_2025_min': '2025 fuel moisture',
+      'LST_2025_max': '2025 max LST',
+      'aspect': 'Aspect',
+      'elevation': 'Elevation'
+    };
+    function renderImportanceChart(impObj) {
+      impHost.clear();
+      var dt = [['Predictor', 'Importance']];
+      Object.keys(impObj).forEach(function(k){
+        var label = PREDICTOR_LABELS[k] || k;
+        dt.push([label, Number(impObj[k])]);
+      });
+      var chart = ui.Chart(dt).setChartType('ColumnChart').setOptions({
+        title: 'Mean decrease in impurity',
+        hAxis: {title:'', slantedText:true, slantedTextAngle:45, textStyle:{fontSize:9}},
+        vAxis: {title:'Importance', textStyle:{fontSize:9}},
+        legend: {position:'none'},
+        colors: ['#a50026'],
+        height: 200, chartArea: {left:50, top:30, width:'80%', height:'55%'}
+      });
+      impHost.add(chart);
+    }
+    if (USE_DIAG_ASSET) {
+      whenDiag(function(d){
+        var keys = parseStringList(d.imp_keys);
+        var vals = parseFloatList(d.imp_vals);
+        if (!keys.length) {
+          impHost.clear();
+          impHost.add(ui.Label('Feature importance not available in diag asset.',{
+            fontSize:'10px', color:'#c00', margin:'0'
+          }));
+          return;
+        }
+        var impObj = {};
+        for (var i = 0; i < keys.length; i++) impObj[keys[i]] = vals[i];
+        renderImportanceChart(impObj);
+      });
+    } else {
+      ee.Dictionary(rfProb.explain()).get('importance').evaluate(function(impObj, err){
+        impHost.clear();
+        if (err || !impObj) { return; }
+        renderImportanceChart(impObj);
+      });
+    }
+  
+    // 5b. Fast metrics: J*, accuracy, kappa, producer's, consumer's, OOB
+    sidebar.add(ui.Label('5b. Model performance',{fontWeight:'bold', margin:'10px 0 4px 0'}));
+    var metricsPanel = ui.Panel({style:{padding:'6px', backgroundColor:'#f4f4f4', margin:'0 0 8px 0'}});
+  
+    function metricRow(label){
+      var l = ui.Label(label + ': ...',{fontSize:'10px', margin:'0', color:'#999'});
+      metricsPanel.add(l);
+      return l;
+    }
+    function fillNum(lbl, prefix, val, digits){
+      lbl.setValue(prefix + ': ' + Number(val).toFixed(digits || 3));
+      lbl.style().set('color','#222');
+    }
+  
+    var lblJ = metricRow('Youden J threshold');
+    var lblAcc = metricRow('Accuracy at J*');
+    var lblKappa = metricRow('Kappa at J*');
+    var lblProd = metricRow('Producer\'s acc (recall)');
+    var lblCons = metricRow('Consumer\'s acc (precision)');
+    var lblOOB = metricRow('OOB error estimate');
+  
+    metricsPanel.add(ui.Label('Train: Mação, Góis, Abrantes. Test: Pedrógão.',{
+      fontSize:'9px', color:'#555', margin:'4px 0 0 0'
+    }));
+    metricsPanel.add(ui.Label('Kappa at 0.5 uninformative for compressed probabilities; J* is the ROC-optimal operating point.',{
+      fontSize:'9px', color:'#555', margin:'2px 0 0 0'
+    }));
+    metricsPanel.add(ui.Label('Class 0 = no reburn, Class 1 = reburn (binary).',{
+      fontSize:'9px', color:'#555', margin:'2px 0 0 0'
+    }));
+  
+    function renderFastMetrics(j, acc, kappa, prod, cons, oob) {
+      if (j != null) fillNum(lblJ, 'Youden J threshold', j);
+      if (acc != null) fillNum(lblAcc, 'Accuracy at J*', acc);
+      if (kappa != null) fillNum(lblKappa, 'Kappa at J*', kappa);
+      if (prod && prod[0] && prod[1]) {
+        lblProd.setValue('Producer\'s acc (recall): no=' + prod[0][0].toFixed(2) + ' / re=' + prod[1][0].toFixed(2));
+        lblProd.style().set('color','#222');
+      }
+      if (cons && cons[0] && cons[0].length >= 2) {
+        lblCons.setValue('Consumer\'s acc (precision): no=' + cons[0][0].toFixed(2) + ' / re=' + cons[0][1].toFixed(2));
+        lblCons.style().set('color','#222');
+      }
+      if (oob != null) fillNum(lblOOB, 'OOB error estimate', Number(oob));
+    }
+    if (USE_DIAG_ASSET) {
+      whenDiag(function(d){
+        var prodMatrix = parseMatrix(d.prod);
+        var consMatrix = parseMatrix(d.cons);
+        renderFastMetrics(d.j, d.acc, d.kappa, prodMatrix, consMatrix, d.oob);
+      });
+    } else {
+      // Bundle 6 metrics into one evaluate to avoid GEE's parallel-same-graph
+      // rate limiting. Separate requests would stall a few of the metrics.
+      var oobErr = ee.Dictionary(rfProb.explain()).get('outOfBagErrorEstimate');
+      var fastMetrics = ee.Dictionary({
+        j: optThreshold, acc: confMatrixOpt.accuracy(), kappa: confMatrixOpt.kappa(),
+        prod: confMatrixOpt.producersAccuracy(), cons: confMatrixOpt.consumersAccuracy(),
+        oob: oobErr
+      });
+      fastMetrics.evaluate(function(d, err){
+        if (err || !d) return;
+        renderFastMetrics(d.j, d.acc, d.kappa, d.prod, d.cons, d.oob);
+      });
+    }
+  
+    sidebar.add(metricsPanel);
+  
+    // 5c. Probabilistic metrics: AUC test/train + Brier
+    sidebar.add(ui.Label('5c. Probabilistic metrics',{fontWeight:'bold', margin:'10px 0 4px 0'}));
+    var heavyMetricsPanel = ui.Panel({style:{padding:'6px', backgroundColor:'#f4f4f4', margin:'0 0 8px 0'}});
+    var lblAucT = ui.Label('AUC test (spatial holdout): ...',{fontSize:'10px', margin:'0', color:'#0d47a1'});
+    var lblAucR = ui.Label('AUC train: ...', {fontSize:'10px', margin:'0', color:'#0d47a1'});
+    var lblBrier = ui.Label('Brier score: ...', {fontSize:'10px', margin:'0', color:'#0d47a1'});
+    heavyMetricsPanel.add(lblAucT);
+    heavyMetricsPanel.add(lblAucR);
+    heavyMetricsPanel.add(lblBrier);
+    sidebar.add(heavyMetricsPanel);
+  
+    // Mann-Whitney U formula for AUC, computed in the browser:
+    // AUC = (sum_of_ranks_of_positives - n_pos*(n_pos+1)/2) / (n_pos * n_neg).
+    // Ties handled with average-rank assignment.
+    function clientAUC(rows) {
+      if (!rows || !rows.length) return null;
+      var indexed = rows.map(function(r){ return [r[0], r[1]]; });
+      indexed.sort(function(a, b){ return a[0] - b[0]; });
+      var n = indexed.length;
+      var ranks = new Array(n);
+      var i = 0;
+      while (i < n) {
+        var j = i;
+        while (j < n - 1 && indexed[j+1][0] === indexed[i][0]) j++;
+        var avgRank = (i + j) / 2 + 1;
+        for (var k = i; k <= j; k++) ranks[k] = avgRank;
+        i = j + 1;
+      }
+      var sumPosRanks = 0, nPos = 0;
+      for (var m = 0; m < n; m++) {
+        if (indexed[m][1] === 1) { sumPosRanks += ranks[m]; nPos++; }
+      }
+      var nNeg = n - nPos;
+      if (!nPos || !nNeg) return null;
+      return (sumPosRanks - nPos * (nPos + 1) / 2) / (nPos * nNeg);
+    }
+    function renderHeavyMetrics(valRows, trainRows, brier) {
+      var vt = clientAUC(valRows);
+      var vr = clientAUC(trainRows);
+      if (vt != null) lblAucT.setValue('AUC test (spatial holdout): ' + vt.toFixed(3));
+      if (vr != null) lblAucR.setValue('AUC train: ' + vr.toFixed(3));
+      if (brier != null) lblBrier.setValue('Brier score: ' + Number(brier).toFixed(3));
+    }
+    if (USE_DIAG_ASSET) {
+      whenDiag(function(d){
+        var valRows = parseMatrix(d.aucValRows);
+        var trainRows = parseMatrix(d.aucTrainRows);
+        renderHeavyMetrics(valRows, trainRows, d.brier);
+      });
+    } else {
+      ee.Dictionary({
+        val: aucValRows, train: aucTrainRows, brier: brierScore
+      }).evaluate(function(d, err){
+        if (err || !d) return;
+        var valRows = d.val && d.val.list ? d.val.list : d.val;
+        var trainRows = d.train && d.train.list ? d.train.list : d.train;
+        renderHeavyMetrics(valRows, trainRows, d.brier);
+      });
+    }
+  
+    // 5d. Partial dependence plots
+    sidebar.add(ui.Label('5d. Variable-probability relationship (PDP)',{
+      fontWeight:'bold', margin:'10px 0 4px 0'
+    }));
+    sidebar.add(ui.Label('Binned mean predicted probability vs each key predictor.',{
+      fontSize:'9px', color:'#666', margin:'0 0 4px 0'
+    }));
+    var pdpHost = ui.Panel({style:{margin:'0', padding:'0'}});
+    pdpHost.add(ui.Label('Computing PDP charts...',{
+      fontSize:'10px', color:'#999', margin:'4px 0', fontStyle:'italic'
+    }));
+    sidebar.add(pdpHost);
+  
+    function pdpLineChart(xArr, yArr, title, xLabel, color){
+      if (!xArr || !yArr || xArr.length === 0) return ui.Label('(no data)',{fontSize:'10px', color:'#999'});
+      var dt = [[xLabel, 'Mean predicted prob']];
+      for (var i = 0; i < xArr.length; i++) {
+        dt.push([Number(xArr[i]), Number(yArr[i])]);
+      }
+      return ui.Chart(dt).setChartType('LineChart').setOptions({
+        title: title,
+        hAxis: {title: xLabel, textStyle:{fontSize:9}, format:'short'},
+        vAxis: {title:'Mean predicted prob', textStyle:{fontSize:9},
+                viewWindow:{min:0, max:1}, format:'short'},
+        legend: {position:'none'},
+        colors: [color], lineWidth: 2, pointSize: 4,
+        height: 150, chartArea: {left:50, top:30, width:'80%', height:'55%'}
+      });
+    }
+    function renderPDP(ns_x, ns_y, dn_x, dn_y, nd_x, nd_y, ls_x, ls_y) {
+      pdpHost.clear();
+      pdpHost.add(pdpLineChart(ns_x, ns_y, 'Recovery slope vs reburn prob', 'Recovery slope', '#1a9850'));
+      pdpHost.add(pdpLineChart(dn_x, dn_y, '2017 burn severity vs reburn prob', '2017 burn severity','#a50026'));
+      pdpHost.add(pdpLineChart(nd_x, nd_y, '2025 NDVI vs reburn prob', '2025 NDVI', '#66a61e'));
+      pdpHost.add(pdpLineChart(ls_x, ls_y, '2025 max LST vs reburn prob', '2025 max LST', '#d73027'));
+    }
+    if (USE_DIAG_ASSET) {
+      whenDiag(function(d){
+        renderPDP(
+          parseFloatList(d.ns_x), parseFloatList(d.ns_y),
+          parseFloatList(d.dn_x), parseFloatList(d.dn_y),
+          parseFloatList(d.nd_x), parseFloatList(d.nd_y),
+          parseFloatList(d.ls_x), parseFloatList(d.ls_y)
+        );
+      });
+    } else {
+      ee.Dictionary({
+        ns_x: pdp_NBRslope.aggregate_array('bin_center'),
+        ns_y: pdp_NBRslope.aggregate_array('mean_prob'),
+        dn_x: pdp_dNBR.aggregate_array('bin_center'),
+        dn_y: pdp_dNBR.aggregate_array('mean_prob'),
+        nd_x: pdp_NDVI.aggregate_array('bin_center'),
+        nd_y: pdp_NDVI.aggregate_array('mean_prob'),
+        ls_x: pdp_LST.aggregate_array('bin_center'),
+        ls_y: pdp_LST.aggregate_array('mean_prob')
+      }).evaluate(function(d, err){
+        if (err || !d) return;
+        renderPDP(d.ns_x, d.ns_y, d.dn_x, d.dn_y, d.nd_x, d.nd_y, d.ls_x, d.ls_y);
+      });
+    }
+  
+    sidebar.add(ui.Label('Data: ICNF fire perimeters; Sentinel-2; Landsat 8/9; Copernicus DEM.',{
+      fontSize:'9px', color:'#999', margin:'8px 0 0 0'
+    }));
+  
+    // Bottom spacer to keep the last chart above Google logo overlay.
+    sidebar.add(ui.Panel({style:{height:'120px', margin:'0', padding:'0'}}));
+  
+    // Mount sidebar as Map overlay (top-left).
+    // ui.root flex layout was tried but its detach/reattach caused chart
+    // library to crash with offsetWidth null on async callbacks. Overlay is stable.
+    sidebar.style().set({
+      position:'top-left', width:'420px', maxHeight:'100%',
+      margin:'0', padding:'10px', backgroundColor:'rgba(255,255,255,0.96)'
+    });
+    Map.add(sidebar);
+  
+    // Save ui.root state so the split-view Back button can restore it.
+    // ui.root.clear + ui.root.addMap is unreliable: GEE caches Map's render
+    // tree but detach/reattach drops widgets, leaving a blank page.
+    var origRootWidgets = [];
+    var rootList = ui.root.widgets();
+    for (var i_root = 0; i_root < rootList.length(); i_root++) {
+      origRootWidgets.push(rootList.get(i_root));
+    }
+
   }
+
+  else {
+  // First-run preview: USE_ASSET is false, asset hasn't been exported yet.
+  // Show three minimal layers so user can verify data wiring before
+  // running the export tasks.
+  Map.centerObject(aoi_burn, 9);
+  Map.addLayer(aoi_burn, {color:'red'}, '2017 Burn Footprint');
+  Map.addLayer(burned_after.selfMask(), {palette:['#cc0000']}, 'Reburn 2018-2025');
+  Map.addLayer(dNBR_2017.clip(aoi_burn),
+    {min:-100, max:1000, palette:['blue','white','yellow','orange','red']}, '2017 dNBR');
+
+  print('USE_ASSET = false. Run predictors_export_icnf, then flip USE_ASSET=true and re-run.');
+}
