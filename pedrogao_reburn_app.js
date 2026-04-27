@@ -113,5 +113,23 @@ var elevation = dem.unmask(0);
 
 // dist_settlement dropped in v2: zero RF importance at 100 m
 // rural footprint, uniform settlement distance, signal absorbed by elevation
+function clipLocal(img) { return img.clip(aoi_buffered); }
+
+// Stage A: bundle 8 predictor bands and export to asset.
+var predictors_raw = ee.Image.cat([
+  clipLocal(dNBR_2017), clipLocal(NBR_slope), clipLocal(NBR_offset),
+  clipLocal(NDVI_2025), clipLocal(NDMI_2025_min), clipLocal(LST_2025_max),
+  clipLocal(aspect), clipLocal(elevation)
+]);
+
+Export.image.toAsset({
+  image: predictors_raw.toFloat(),
+  description: 'predictors_export_icnf',
+  assetId: ASSET_PATH,
+  region: aoi_burn, scale: GRID_SCALE, crs: TARGET_PROJ, maxPixels: 1e10
+});
+
+var predictors = USE_ASSET ? ee.Image(ASSET_PATH).clip(aoi_burn) : predictors_raw.clip(aoi_burn);
+var label_100m = burned_after.clip(aoi_burn).rename('reburn');
 // Each team member appends their assigned section below in order.
 // Refer to TASK_SPLIT.md for the section ownership map and the code for each Part.
